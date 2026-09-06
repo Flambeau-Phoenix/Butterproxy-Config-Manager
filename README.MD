@@ -1,4 +1,4 @@
-# Butterproxy GUI Config Manager - Enhanced Edition
+# Butterproxy GUI Config Manager 
 
 A Python-based graphical user interface (GUI) designed to easily fetch available models from OpenAI-compatible API endpoints, update local configuration files, and manage remote headless instances of Butterproxy securely over SSH/SFTP.
 
