@@ -355,7 +355,10 @@ func summarizeButterConfig(config map[string]any, raw, configPath string) butter
 	for modelID, rawRoute := range routes {
 		route := butterMap(rawRoute)
 		for _, provider := range butterStringSlice(route["providers"]) {
-			modelsByProvider[provider] = append(modelsByProvider[provider], modelID)
+			prefix := provider + "/"
+			if strings.HasPrefix(modelID, prefix) && len(butterStringSlice(route["providers"])) == 1 {
+				modelsByProvider[provider] = append(modelsByProvider[provider], strings.TrimPrefix(modelID, prefix))
+			}
 		}
 	}
 	result := butterConfigSummary{
@@ -596,7 +599,7 @@ func saveRemoteButterProvider(client *ssh.Client, connection butterSSHConnection
 	if strings.TrimSpace(edit.APIKey) != "" {
 		envName := strings.TrimSpace(edit.KeyEnv)
 		if envName == "" {
-			envName = strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name)) + "_API_KEY"
+			return butterConfigSummary{}, errors.New("enter the environment variable name for this API key")
 		}
 		if strings.ContainsAny(envName, " =\r\n\t") {
 			return butterConfigSummary{}, errors.New("API key environment variable name is invalid")
@@ -627,23 +630,12 @@ func saveRemoteButterProvider(client *ssh.Client, connection butterSSHConnection
 	for modelID, rawRoute := range routes {
 		route := butterMap(rawRoute)
 		current := butterStringSlice(route["providers"])
-		remaining := []any{}
-		found := false
-		for _, providerName := range current {
-			if providerName == name {
-				found = true
-			} else {
-				remaining = append(remaining, providerName)
-			}
-		}
-		if found && len(remaining) == 0 {
+		if len(current) == 1 && current[0] == name {
 			delete(routes, modelID)
-		} else if found {
-			route["providers"] = remaining
 		}
 	}
 	for _, model := range models {
-		routes[model] = map[string]any{"providers": []any{name}, "strategy": "priority"}
+		routes[name+"/"+model] = map[string]any{"providers": []any{name}, "strategy": "priority"}
 	}
 	if edit.MakeDefault || routing["default_provider"] == nil {
 		routing["default_provider"] = name
@@ -677,16 +669,8 @@ func deleteRemoteButterProvider(client *ssh.Client, connection butterSSHConnecti
 	routes := butterMap(routing["models"])
 	for modelID, rawRoute := range routes {
 		route := butterMap(rawRoute)
-		remaining := []any{}
-		for _, providerName := range butterStringSlice(route["providers"]) {
-			if providerName != name {
-				remaining = append(remaining, providerName)
-			}
-		}
-		if len(remaining) == 0 {
+		if current := butterStringSlice(route["providers"]); len(current) == 1 && current[0] == name {
 			delete(routes, modelID)
-		} else {
-			route["providers"] = remaining
 		}
 	}
 	rendered, err := yaml.Marshal(config)
