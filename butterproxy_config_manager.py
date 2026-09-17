@@ -45,9 +45,21 @@ except ImportError:  # pragma: no cover - remote support is optional
 
 
 APP_NAME = "Butterproxy Config Manager"
-VERSION = "1.0.0"
-DEFAULT_CONFIG_PATH = Path("/etc/butter/config.yaml")
-DEFAULT_ENV_PATH = Path("/opt/eh-stack/config/eh.env")
+VERSION = "1.1.0"
+DEFAULT_CONFIG_PATH = (
+    Path("/home/flambeau/butter/config.yaml")
+    if Path("/home/flambeau/butter/config.yaml").exists()
+    else (
+        Path("/etc/butter/config.yaml")
+        if Path("/etc/butter/config.yaml").exists()
+        else Path("config.yaml")
+    )
+)
+DEFAULT_ENV_PATH = (
+    Path("/opt/eh-stack/config/eh.env")
+    if Path("/opt/eh-stack/config/eh.env").exists()
+    else Path(".env")
+)
 STATE_DIR = Path.home() / ".config" / "butterproxy-config-manager"
 ENDPOINTS_PATH = STATE_DIR / "endpoints.json"
 SSH_PROFILES_PATH = STATE_DIR / "ssh-profiles.json"
@@ -56,14 +68,64 @@ ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PROVIDER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SERVICE_NAME = re.compile(r"^[A-Za-z0-9_.@-]+$")
 
+# Butter proxy binary switches strictly on these native provider names
+VALID_BUTTER_PROVIDERS = {
+    "openai",
+    "openrouter",
+    "anthropic",
+    "gemini",
+    "bedrock",
+    "groq",
+    "mistral",
+    "together",
+    "fireworks",
+    "perplexity",
+    "azureopenai",
+}
+
+# Maps common aliases and OpenAI-compatible gateways to Butter's native provider types
+PROVIDER_TYPE_MAP = {
+    "local-ollama": "openai",
+    "ollama": "openai",
+    "kilo-gateway": "openai",
+    "kilo": "openai",
+    "deepseek": "openai",
+    "vllm": "openai",
+    "lm-studio": "openai",
+    "opencode-go": "openai",
+    "together-ai": "together",
+}
+
 ENDPOINT_PRESETS = [
-    ("Local Ollama", "http://127.0.0.1:11434/v1"),
-    ("OpenRouter", "https://openrouter.ai/api/v1"),
-    ("OpenAI", "https://api.openai.com/v1"),
-    ("Groq", "https://api.groq.com/openai/v1"),
-    ("Together AI", "https://api.together.xyz/v1"),
-    ("DeepSeek", "https://api.deepseek.com/v1"),
+    ("Local Ollama", "http://127.0.0.1:11434/v1", "openai", "none"),
+    ("Kilo Gateway", "https://api.kilo.ai/api/gateway/v1", "openai", "KILO_API_KEY"),
+    ("OpenRouter", "https://openrouter.ai/api/v1", "openrouter", "OPENROUTER_API_KEY"),
+    ("OpenAI", "https://api.openai.com/v1", "openai", "OPENAI_API_KEY"),
+    ("Groq", "https://api.groq.com/openai/v1", "groq", "GROQ_API_KEY"),
+    ("Together AI", "https://api.together.xyz/v1", "together", "TOGETHER_API_KEY"),
+    ("DeepSeek", "https://api.deepseek.com/v1", "openai", "DEEPSEEK_API_KEY"),
 ]
+
+DEFAULT_SERVER_BLOCK = {
+    "address": ":8080",
+    "read_timeout": "30s",
+    "write_timeout": "120s",
+    "read_header_timeout": "10s",
+    "idle_timeout": "120s",
+    "max_header_bytes": 1048576,
+    "max_request_bytes": 33554432,
+}
+
+DEFAULT_FAILOVER_BLOCK = {
+    "enabled": True,
+    "max_retries": 2,
+    "backoff": {
+        "initial": "100ms",
+        "multiplier": 2.0,
+        "max": "2s",
+    },
+    "retry_on": [429, 500, 502, 503, 504],
+}
 
 
 class ButterConfigError(RuntimeError):
@@ -180,14 +242,27 @@ def atomic_write_text(
     return backup_path
 
 
-def validate_provider_name(name: str) -> str:
-    clean = name.strip()
-    if not PROVIDER_NAME.fullmatch(clean):
+def normalize_provider_name(name: str) -> str:
+    clean = name.strip().lower()
+    return PROVIDER_TYPE_MAP.get(clean, clean)
+
+
+def validate_provider_name(name: str, allow_custom: bool = False) -> str:
+    raw = name.strip()
+    if not PROVIDER_NAME.fullmatch(raw):
         raise ButterConfigError(
             "Provider name must start with a letter or number and contain only "
             "letters, numbers, dots, underscores, or hyphens"
         )
-    return clean
+    normalized = normalize_provider_name(raw)
+    if not allow_custom and normalized not in VALID_BUTTER_PROVIDERS:
+        valid_list = ", ".join(sorted(VALID_BUTTER_PROVIDERS))
+        raise ButterConfigError(
+            f"Provider {raw!r} is not recognized by Butter. Butter binary only routes to native provider types: "
+            f"[{valid_list}]. For OpenAI-compatible endpoints (Ollama, Kilo Gateway, DeepSeek, vLLM), "
+            f"use 'openai' as the provider name with a custom base_url."
+        )
+    return normalized
 
 
 def validate_base_url(base_url: str) -> str:
@@ -218,10 +293,35 @@ def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
     ):
         raise ButterConfigError("Butter config must contain routing.models mapping")
     for name, provider in providers.items():
-        validate_provider_name(str(name))
+        validate_provider_name(str(name), allow_custom=not strict)
         if not isinstance(provider, dict):
             raise ButterConfigError(f"Provider {name!r} must be a mapping")
         validate_base_url(str(provider.get("base_url") or ""))
+
+    if strict:
+        server = config.get("server")
+        if server is not None and not isinstance(server, dict):
+            raise ButterConfigError("Butter config server section must be a mapping")
+        if routing and isinstance(routing, dict):
+            default_provider = routing.get("default_provider")
+            if default_provider and default_provider not in providers:
+                normalized_default = normalize_provider_name(str(default_provider))
+                if normalized_default not in providers:
+                    raise ButterConfigError(
+                        f"Default provider {default_provider!r} is not defined in providers mapping"
+                    )
+            models = routing.get("models")
+            if isinstance(models, dict):
+                for model_id, route in models.items():
+                    if isinstance(route, dict):
+                        route_providers = route.get("providers")
+                        if isinstance(route_providers, list):
+                            for p in route_providers:
+                                norm_p = normalize_provider_name(str(p))
+                                if str(p) not in providers and norm_p not in providers:
+                                    raise ButterConfigError(
+                                        f"Model {model_id!r} references undefined provider {p!r}"
+                                    )
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -235,7 +335,44 @@ def load_config_file(path: Path) -> dict[str, Any]:
 
 def dump_config(config: dict[str, Any]) -> str:
     require_core_dependencies()
-    return yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    ordered: dict[str, Any] = {}
+
+    # 1. Server block (address :8080 and standard timeouts)
+    server = config.get("server")
+    if isinstance(server, dict):
+        server_copy = copy.deepcopy(server)
+        if "address" not in server_copy:
+            server_copy["address"] = ":8080"
+        ordered["server"] = server_copy
+    else:
+        ordered["server"] = copy.deepcopy(DEFAULT_SERVER_BLOCK)
+
+    # 2. Providers block
+    ordered["providers"] = config.get("providers", {})
+
+    # 3. Routing block (ordered with default_provider, failover, models)
+    routing = copy.deepcopy(config.get("routing", {})) if isinstance(config.get("routing"), dict) else {}
+    if "failover" not in routing:
+        routing["failover"] = copy.deepcopy(DEFAULT_FAILOVER_BLOCK)
+
+    ordered_routing: dict[str, Any] = {}
+    if "default_provider" in routing:
+        ordered_routing["default_provider"] = routing["default_provider"]
+    if "failover" in routing:
+        ordered_routing["failover"] = routing["failover"]
+    if "models" in routing:
+        ordered_routing["models"] = routing["models"]
+    for k, v in routing.items():
+        if k not in ordered_routing:
+            ordered_routing[k] = v
+    ordered["routing"] = ordered_routing
+
+    # 4. Any other top-level keys
+    for k, v in config.items():
+        if k not in ordered:
+            ordered[k] = v
+
+    return yaml.safe_dump(ordered, sort_keys=False, allow_unicode=True)
 
 
 def get_routes(config: dict[str, Any], create: bool = False) -> dict[str, Any]:
@@ -980,8 +1117,8 @@ class ButterConfigGUI:
         self.builtin_tree.heading("name", text="Name")
         self.builtin_tree.heading("url", text="URL")
         self.builtin_tree.pack(fill=tk.BOTH, expand=True)
-        for name, url in ENDPOINT_PRESETS:
-            self.builtin_tree.insert("", tk.END, values=(name, url))
+        for item in ENDPOINT_PRESETS:
+            self.builtin_tree.insert("", tk.END, values=(item[0], item[1]))
         self.builtin_tree.bind("<Double-1>", self.load_builtin_preset)
         saved = ttk.LabelFrame(parent, text="Saved endpoints (API keys excluded)", padding=10)
         saved.pack(fill=tk.BOTH, expand=True)
@@ -1047,7 +1184,12 @@ class ButterConfigGUI:
 
     def _refresh_provider_values(self) -> None:
         configured = list((self.config.get("providers") or {}).keys())
-        values = sorted(set(configured) | set(self.saved_endpoints) | {name for name, _ in ENDPOINT_PRESETS})
+        values = sorted(
+            set(configured)
+            | set(self.saved_endpoints)
+            | {prov_type for _, _, prov_type, _ in ENDPOINT_PRESETS}
+            | {name for name, _, _, _ in ENDPOINT_PRESETS}
+        )
         self.provider_combo.configure(values=values)
 
     def _provider_selected(self, _event: Any = None) -> None:
@@ -1059,7 +1201,7 @@ class ButterConfigGUI:
             reference = first_provider_key(provider)
             match = ENV_REF.fullmatch(reference)
             self.key_env_var.set(match.group(1) if match else "")
-            self.no_auth_var.set(reference == "none")
+            self.no_auth_var.set(reference in {"none", "ollama"})
             routing = self.config.get("routing")
             self.default_var.set(isinstance(routing, dict) and routing.get("default_provider") == name)
             self.chosen_models = set(provider_models(self.config, name))
@@ -1068,12 +1210,17 @@ class ButterConfigGUI:
         elif name in self.saved_endpoints:
             self.base_url_var.set(self.saved_endpoints[name]["url"])
         else:
-            preset = next(((title, url) for title, url in ENDPOINT_PRESETS if title == name), None)
+            preset = next((p for p in ENDPOINT_PRESETS if p[0].lower() == name.lower() or p[2].lower() == name.lower()), None)
             if preset:
-                provider_id = preset[0].lower().replace(" ", "-")
-                self.provider_var.set(provider_id)
-                self.base_url_var.set(preset[1])
-                self.key_env_var.set(re.sub(r"[^A-Z0-9]", "_", provider_id.upper()) + "_API_KEY")
+                _, url, prov_type, key_env = preset
+                self.provider_var.set(prov_type)
+                self.base_url_var.set(url)
+                if key_env == "none":
+                    self.no_auth_var.set(True)
+                    self.key_env_var.set("")
+                else:
+                    self.no_auth_var.set(False)
+                    self.key_env_var.set(key_env)
         self.api_key_var.set("")
         self._refresh_model_tree()
 
@@ -1393,8 +1540,20 @@ class ButterConfigGUI:
         selected = self.builtin_tree.selection()
         if selected:
             name, url = self.builtin_tree.item(selected[0])["values"]
-            self.provider_var.set(str(name).lower().replace(" ", "-"))
-            self.base_url_var.set(url)
+            preset = next((p for p in ENDPOINT_PRESETS if p[0] == name), None)
+            if preset:
+                _, url, prov_type, key_env = preset
+                self.provider_var.set(prov_type)
+                self.base_url_var.set(url)
+                if key_env == "none":
+                    self.no_auth_var.set(True)
+                    self.key_env_var.set("")
+                else:
+                    self.no_auth_var.set(False)
+                    self.key_env_var.set(key_env)
+            else:
+                self.provider_var.set(str(name).lower().replace(" ", "-"))
+                self.base_url_var.set(url)
 
     def load_saved_preset(self) -> None:
         selected = self.saved_tree.selection()
