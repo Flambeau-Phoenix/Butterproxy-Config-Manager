@@ -83,27 +83,24 @@ VALID_BUTTER_PROVIDERS = {
     "azureopenai",
 }
 
-# Maps common aliases and OpenAI-compatible gateways to Butter's native provider types
+# Maps common aliases to canonical provider names (custom OpenAI endpoints maintain their distinct identity)
 PROVIDER_TYPE_MAP = {
-    "local-ollama": "openai",
-    "ollama": "openai",
-    "kilo-gateway": "openai",
-    "kilo": "openai",
-    "deepseek": "openai",
-    "vllm": "openai",
-    "lm-studio": "openai",
-    "opencode-go": "openai",
+    "local-ollama": "ollama",
+    "kilo-gateway": "kilo",
+    "opencode-go": "opencode",
+    "lm-studio": "lmstudio",
     "together-ai": "together",
 }
 
 ENDPOINT_PRESETS = [
-    ("Local Ollama", "http://127.0.0.1:11434/v1", "openai", "none"),
-    ("Kilo Gateway", "https://api.kilo.ai/api/gateway/v1", "openai", "KILO_API_KEY"),
+    ("Local Ollama", "http://127.0.0.1:11434/v1", "ollama", "none"),
+    ("OpenCode Go", "https://opencode.ai/zen/go/v1", "opencode", "OPENCODE_API_KEY"),
+    ("Kilo Gateway", "https://api.kilo.ai/api/gateway/v1", "kilo", "KILO_API_KEY"),
     ("OpenRouter", "https://openrouter.ai/api/v1", "openrouter", "OPENROUTER_API_KEY"),
     ("OpenAI", "https://api.openai.com/v1", "openai", "OPENAI_API_KEY"),
     ("Groq", "https://api.groq.com/openai/v1", "groq", "GROQ_API_KEY"),
     ("Together AI", "https://api.together.xyz/v1", "together", "TOGETHER_API_KEY"),
-    ("DeepSeek", "https://api.deepseek.com/v1", "openai", "DEEPSEEK_API_KEY"),
+    ("DeepSeek", "https://api.deepseek.com/v1", "deepseek", "DEEPSEEK_API_KEY"),
 ]
 
 DEFAULT_SERVER_BLOCK = {
@@ -247,7 +244,7 @@ def normalize_provider_name(name: str) -> str:
     return PROVIDER_TYPE_MAP.get(clean, clean)
 
 
-def validate_provider_name(name: str, allow_custom: bool = False) -> str:
+def validate_provider_name(name: str, allow_custom: bool = True) -> str:
     raw = name.strip()
     if not PROVIDER_NAME.fullmatch(raw):
         raise ButterConfigError(
@@ -258,9 +255,8 @@ def validate_provider_name(name: str, allow_custom: bool = False) -> str:
     if not allow_custom and normalized not in VALID_BUTTER_PROVIDERS:
         valid_list = ", ".join(sorted(VALID_BUTTER_PROVIDERS))
         raise ButterConfigError(
-            f"Provider {raw!r} is not recognized by Butter. Butter binary only routes to native provider types: "
-            f"[{valid_list}]. For OpenAI-compatible endpoints (Ollama, Kilo Gateway, DeepSeek, vLLM), "
-            f"use 'openai' as the provider name with a custom base_url."
+            f"Provider {raw!r} is not recognized by Butter. Native provider types: "
+            f"[{valid_list}], or custom OpenAI-compatible endpoints (e.g. 'opencode', 'kilo', 'ollama')."
         )
     return normalized
 
@@ -293,7 +289,7 @@ def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
     ):
         raise ButterConfigError("Butter config must contain routing.models mapping")
     for name, provider in providers.items():
-        validate_provider_name(str(name), allow_custom=not strict)
+        validate_provider_name(str(name), allow_custom=True)
         if not isinstance(provider, dict):
             raise ButterConfigError(f"Provider {name!r} must be a mapping")
         validate_base_url(str(provider.get("base_url") or ""))
